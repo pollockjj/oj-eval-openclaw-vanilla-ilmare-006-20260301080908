@@ -3,6 +3,8 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <queue>
+#include <string>
 
 /*
  * You may need to define some global variables for the information of the game map here.
@@ -15,6 +17,81 @@ int columns;      // The count of columns of the game map. You MUST NOT modify i
 int total_mines;  // The count of mines of the game map. You MUST NOT modify its name. You should initialize this
                   // variable in function InitMap. It will be used in the advanced task.
 int game_state;  // The state of the game, 0 for continuing, 1 for winning, -1 for losing. You MUST NOT modify its name.
+
+// Internal states
+namespace server_internal {
+constexpr int kSrvMaxN = 35;
+constexpr int kSrvUnknown = 0;
+constexpr int kSrvVisited = 1;
+constexpr int kSrvMarked = 2;
+
+bool mine_map[kSrvMaxN][kSrvMaxN];
+int visible_state[kSrvMaxN][kSrvMaxN];
+int adjacent_mines[kSrvMaxN][kSrvMaxN];
+
+int visited_safe_count = 0;
+
+const int srv_dr[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
+const int srv_dc[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+
+inline bool InBoundsSrv(int r, int c) {
+  return 0 <= r && r < rows && 0 <= c && c < columns;
+}
+
+void TrySetWin() {
+  if (visited_safe_count == rows * columns - total_mines) {
+    game_state = 1;
+  }
+}
+
+void RevealFlood(int sr, int sc) {
+  std::queue<std::pair<int, int>> q;
+  if (visible_state[sr][sc] != kSrvUnknown || mine_map[sr][sc]) {
+    return;
+  }
+  visible_state[sr][sc] = kSrvVisited;
+  ++visited_safe_count;
+  q.push({sr, sc});
+
+  while (!q.empty()) {
+    auto [r, c] = q.front();
+    q.pop();
+    if (adjacent_mines[r][c] != 0) {
+      continue;
+    }
+    for (int i = 0; i < 8; ++i) {
+      int nr = r + srv_dr[i], nc = c + srv_dc[i];
+      if (!InBoundsSrv(nr, nc)) {
+        continue;
+      }
+      if (visible_state[nr][nc] != kSrvUnknown) {
+        continue;
+      }
+      if (mine_map[nr][nc]) {
+        continue;
+      }
+      visible_state[nr][nc] = kSrvVisited;
+      ++visited_safe_count;
+      if (adjacent_mines[nr][nc] == 0) {
+        q.push({nr, nc});
+      }
+    }
+  }
+}
+
+int CountCorrectMarkedMines() {
+  int cnt = 0;
+  for (int i = 0; i < rows; ++i) {
+    for (int j = 0; j < columns; ++j) {
+      if (visible_state[i][j] == kSrvMarked && mine_map[i][j]) {
+        ++cnt;
+      }
+    }
+  }
+  return cnt;
+}
+}  // namespace server_internal
+using namespace server_internal;
 
 /**
  * @brief The definition of function InitMap()
@@ -30,7 +107,38 @@ int game_state;  // The state of the game, 0 for continuing, 1 for winning, -1 f
  */
 void InitMap() {
   std::cin >> rows >> columns;
-  // TODO (student): Implement me!
+  total_mines = 0;
+  game_state = 0;
+  visited_safe_count = 0;
+
+  for (int i = 0; i < rows; ++i) {
+    std::string s;
+    std::cin >> s;
+    for (int j = 0; j < columns; ++j) {
+      mine_map[i][j] = (s[j] == 'X');
+      visible_state[i][j] = kSrvUnknown;
+      if (mine_map[i][j]) {
+        ++total_mines;
+      }
+    }
+  }
+
+  for (int i = 0; i < rows; ++i) {
+    for (int j = 0; j < columns; ++j) {
+      if (mine_map[i][j]) {
+        adjacent_mines[i][j] = -1;
+        continue;
+      }
+      int cnt = 0;
+      for (int k = 0; k < 8; ++k) {
+        int ni = i + srv_dr[k], nj = j + srv_dc[k];
+        if (InBoundsSrv(ni, nj) && mine_map[ni][nj]) {
+          ++cnt;
+        }
+      }
+      adjacent_mines[i][j] = cnt;
+    }
+  }
 }
 
 /**
@@ -64,7 +172,21 @@ void InitMap() {
  * @note For invalid operation, you should not do anything.
  */
 void VisitBlock(int r, int c) {
-  // TODO (student): Implement me!
+  if (!InBoundsSrv(r, c)) {
+    return;
+  }
+  if (visible_state[r][c] == kSrvVisited || visible_state[r][c] == kSrvMarked) {
+    return;
+  }
+
+  if (mine_map[r][c]) {
+    visible_state[r][c] = kSrvVisited;
+    game_state = -1;
+    return;
+  }
+
+  RevealFlood(r, c);
+  TrySetWin();
 }
 
 /**
@@ -101,7 +223,20 @@ void VisitBlock(int r, int c) {
  * @note For invalid operation, you should not do anything.
  */
 void MarkMine(int r, int c) {
-  // TODO (student): Implement me!
+  if (!InBoundsSrv(r, c)) {
+    return;
+  }
+  if (visible_state[r][c] == kSrvVisited || visible_state[r][c] == kSrvMarked) {
+    return;
+  }
+
+  visible_state[r][c] = kSrvMarked;
+  if (!mine_map[r][c]) {
+    game_state = -1;
+    return;
+  }
+
+  TrySetWin();
 }
 
 /**
@@ -121,7 +256,51 @@ void MarkMine(int r, int c) {
  * And the game ends (and player wins).
  */
 void AutoExplore(int r, int c) {
-  // TODO (student): Implement me!
+  if (!InBoundsSrv(r, c)) {
+    return;
+  }
+  if (visible_state[r][c] != kSrvVisited) {
+    return;
+  }
+  if (mine_map[r][c]) {
+    return;
+  }
+
+  int marked_neighbors = 0;
+  for (int i = 0; i < 8; ++i) {
+    int nr = r + srv_dr[i], nc = c + srv_dc[i];
+    if (!InBoundsSrv(nr, nc)) {
+      continue;
+    }
+    if (visible_state[nr][nc] == kSrvMarked) {
+      ++marked_neighbors;
+    }
+  }
+
+  if (marked_neighbors != adjacent_mines[r][c]) {
+    return;
+  }
+
+  for (int i = 0; i < 8; ++i) {
+    int nr = r + srv_dr[i], nc = c + srv_dc[i];
+    if (!InBoundsSrv(nr, nc)) {
+      continue;
+    }
+    if (visible_state[nr][nc] == kSrvMarked) {
+      continue;
+    }
+    if (visible_state[nr][nc] == kSrvVisited) {
+      continue;
+    }
+    VisitBlock(nr, nc);
+    if (game_state == -1) {
+      return;
+    }
+  }
+
+  if (game_state == 0) {
+    TrySetWin();
+  }
 }
 
 /**
@@ -134,7 +313,13 @@ void AutoExplore(int r, int c) {
  * @note If the player wins, we consider that ALL mines are correctly marked.
  */
 void ExitGame() {
-  // TODO (student): Implement me!
+  if (game_state == 1) {
+    std::cout << "YOU WIN!" << std::endl;
+    std::cout << visited_safe_count << " " << total_mines << std::endl;
+  } else {
+    std::cout << "GAME OVER!" << std::endl;
+    std::cout << visited_safe_count << " " << CountCorrectMarkedMines() << std::endl;
+  }
   exit(0);  // Exit the game immediately
 }
 
@@ -163,7 +348,22 @@ void ExitGame() {
  * @note Use std::cout to print the game map, especially when you want to try the advanced task!!!
  */
 void PrintMap() {
-  // TODO (student): Implement me!
+  for (int i = 0; i < rows; ++i) {
+    for (int j = 0; j < columns; ++j) {
+      char ch = '?';
+      if (game_state == 1 && mine_map[i][j]) {
+        ch = '@';
+      } else if (visible_state[i][j] == kSrvUnknown) {
+        ch = '?';
+      } else if (visible_state[i][j] == kSrvMarked) {
+        ch = mine_map[i][j] ? '@' : 'X';
+      } else {  // visited
+        ch = mine_map[i][j] ? 'X' : static_cast<char>('0' + adjacent_mines[i][j]);
+      }
+      std::cout << ch;
+    }
+    std::cout << std::endl;
+  }
 }
 
 #endif
