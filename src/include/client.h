@@ -403,7 +403,7 @@ bool ApplyExactComponentInference(const std::vector<Constraint> &constraints) {
     comp_constraints[comp].push_back(ci);
   }
 
-  constexpr int kExactLimit = 22;
+  constexpr int kExactLimit = 26;
 
   for (int comp = 0; comp < comp_cnt; ++comp) {
     auto &vars = comp_vars[comp];
@@ -585,6 +585,8 @@ Action ChooseGuess() {
       if (has_exact_prob[r][c]) {
         p = exact_prob[r][c];
       } else {
+        double sum_local = 0.0;
+        int cnt_local = 0;
         for (int k = 0; k < 8; ++k) {
           int nr = r + dr[k], nc = c + dc[k];
           if (!InBounds(nr, nc) || board[nr][nc] < 0) {
@@ -613,10 +615,12 @@ Action ChooseGuess() {
               need = unknown;
             }
             double local_p = static_cast<double>(need) / static_cast<double>(unknown);
-            if (local_p > p) {
-              p = local_p;
-            }
+            sum_local += local_p;
+            ++cnt_local;
           }
+        }
+        if (cnt_local > 0) {
+          p = (base_p + sum_local / cnt_local) * 0.5;
         }
       }
 
