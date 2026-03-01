@@ -206,6 +206,38 @@ bool ApplyBasicInference() {
       }
     }
   }
+
+  int unknown_cnt = 0, flagged_cnt = 0;
+  for (int r = 0; r < rows; ++r) {
+    for (int c = 0; c < columns; ++c) {
+      if (board[r][c] == kUnknown) {
+        ++unknown_cnt;
+      } else if (board[r][c] == kFlagged) {
+        ++flagged_cnt;
+      }
+    }
+  }
+  int remain_mines = total_mines - flagged_cnt;
+  if (remain_mines == 0) {
+    for (int r = 0; r < rows; ++r) {
+      for (int c = 0; c < columns; ++c) {
+        if (board[r][c] == kUnknown) {
+          EnqueueVisit(r, c);
+          changed = true;
+        }
+      }
+    }
+  } else if (remain_mines == unknown_cnt) {
+    for (int r = 0; r < rows; ++r) {
+      for (int c = 0; c < columns; ++c) {
+        if (board[r][c] == kUnknown) {
+          EnqueueMark(r, c);
+          changed = true;
+        }
+      }
+    }
+  }
+
   return changed;
 }
 
