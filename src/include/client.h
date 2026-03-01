@@ -605,10 +605,6 @@ Action ChooseGuess() {
   int best_info = -1;
   int best_r = -1, best_c = -1;
 
-  bool found_mark = false;
-  double best_mark_p = -1.0;
-  int best_mark_r = -1, best_mark_c = -1;
-
   for (int r = 0; r < rows; ++r) {
     for (int c = 0; c < columns; ++c) {
       if (board[r][c] != kUnknown) {
@@ -660,18 +656,6 @@ Action ChooseGuess() {
         }
       }
 
-      if (has_exact_prob[r][c]) {
-        if (!found_mark || p > best_mark_p + 1e-12 ||
-            (std::abs(p - best_mark_p) <= 1e-12 &&
-             std::abs(r - rows / 2) + std::abs(c - columns / 2) <
-                 std::abs(best_mark_r - rows / 2) + std::abs(best_mark_c - columns / 2))) {
-          found_mark = true;
-          best_mark_p = p;
-          best_mark_r = r;
-          best_mark_c = c;
-        }
-      }
-
       if (!found || p < best_p - 1e-12 ||
           (std::abs(p - best_p) <= 1e-12 && info > best_info) ||
           (std::abs(p - best_p) <= 1e-12 && info == best_info &&
@@ -689,13 +673,6 @@ Action ChooseGuess() {
   if (!found) {
     return {0, 0, 0};
   }
-
-  // In dense endgames, a high-confidence exact mine mark can have better expected value
-  // than visiting the least-risk cell.
-  if (found_mark && best_mark_p >= 0.80 && best_mark_p > (1.0 - best_p) + 0.03) {
-    return {best_mark_r, best_mark_c, 1};
-  }
-
   return {best_r, best_c, 0};
 }
 }  // namespace client_internal
