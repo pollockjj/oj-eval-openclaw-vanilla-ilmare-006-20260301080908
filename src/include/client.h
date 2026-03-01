@@ -2,8 +2,12 @@
 #define CLIENT_H
 
 #include <algorithm>
+#include <cmath>
 #include <deque>
+#include <functional>
 #include <iostream>
+#include <queue>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -39,11 +43,19 @@ struct Action {
   int r, c, type;
 };
 
+struct Constraint {
+  std::vector<int> vars;
+  int need;
+};
+
 int board[kMaxN][kMaxN];
 std::deque<Action> action_queue;
 bool queued_visit[kMaxN][kMaxN];
 bool queued_mark[kMaxN][kMaxN];
 bool queued_auto[kMaxN][kMaxN];
+
+double exact_prob[kMaxN][kMaxN];
+bool has_exact_prob[kMaxN][kMaxN];
 
 const int dr[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
 const int dc[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
@@ -67,6 +79,15 @@ void ResetQueues() {
       queued_visit[i][j] = false;
       queued_mark[i][j] = false;
       queued_auto[i][j] = false;
+    }
+  }
+}
+
+void ClearExactProb() {
+  for (int i = 0; i < rows; ++i) {
+    for (int j = 0; j < columns; ++j) {
+      has_exact_prob[i][j] = false;
+      exact_prob[i][j] = 0.0;
     }
   }
 }
@@ -99,10 +120,7 @@ bool ValidAction(const Action &a) {
   if (!InBounds(a.r, a.c)) {
     return false;
   }
-  if (a.type == 0) {
-    return board[a.r][a.c] == kUnknown;
-  }
-  if (a.type == 1) {
+  if (a.type == 0 || a.type == 1) {
     return board[a.r][a.c] == kUnknown;
   }
   if (a.type == 2) {
@@ -191,11 +209,6 @@ bool ApplyBasicInference() {
   return changed;
 }
 
-struct Equation {
-  std::vector<int> cells;
-  int need;
-};
-
 bool IsSubset(const std::vector<int> &a, const std::vector<int> &b) {
   if (a.size() > b.size()) {
     return false;
@@ -230,8 +243,10 @@ std::vector<int> SetDiff(const std::vector<int> &a, const std::vector<int> &b) {
   return ret;
 }
 
-bool ApplySubsetInference() {
-  std::vector<Equation> eqs;
+std::vector<Constraint> BuildConstraints() {
+  std::vector<Constraint> constraints;
+  constraints.reserve(rows * columns);
+
   for (int r = 0; r < rows; ++r) {
     for (int c = 0; c < columns; ++c) {
       if (board[r][c] < 0) {
@@ -239,7 +254,7 @@ bool ApplySubsetInference() {
       }
       int clue = board[r][c];
       int flagged = 0;
-      std::vector<int> unknown_cells;
+      std::vector<int> unknown_ids;
       for (int k = 0; k < 8; ++k) {
         int nr = r + dr[k], nc = c + dc[k];
         if (!InBounds(nr, nc)) {
@@ -248,34 +263,40 @@ bool ApplySubsetInference() {
         if (board[nr][nc] == kFlagged) {
           ++flagged;
         } else if (board[nr][nc] == kUnknown) {
-          unknown_cells.push_back(CellId(nr, nc));
+          unknown_ids.push_back(CellId(nr, nc));
         }
       }
+      if (unknown_ids.empty()) {
+        continue;
+      }
+      std::sort(unknown_ids.begin(), unknown_ids.end());
+      unknown_ids.erase(std::unique(unknown_ids.begin(), unknown_ids.end()), unknown_ids.end());
       int need = clue - flagged;
-      if (!unknown_cells.empty() && 0 <= need && need <= static_cast<int>(unknown_cells.size())) {
-        std::sort(unknown_cells.begin(), unknown_cells.end());
-        unknown_cells.erase(std::unique(unknown_cells.begin(), unknown_cells.end()), unknown_cells.end());
-        eqs.push_back({unknown_cells, need});
+      if (0 <= need && need <= static_cast<int>(unknown_ids.size())) {
+        constraints.push_back({unknown_ids, need});
       }
     }
   }
+  return constraints;
+}
 
+bool ApplySubsetInference(const std::vector<Constraint> &constraints) {
   bool changed = false;
-  int n = static_cast<int>(eqs.size());
+  int n = static_cast<int>(constraints.size());
   for (int i = 0; i < n; ++i) {
     for (int j = 0; j < n; ++j) {
       if (i == j) {
         continue;
       }
-      const auto &A = eqs[i].cells;
-      const auto &B = eqs[j].cells;
+      const auto &A = constraints[i].vars;
+      const auto &B = constraints[j].vars;
       if (A.empty() || B.empty() || A == B) {
         continue;
       }
       if (!IsSubset(A, B)) {
         continue;
       }
-      int need_diff = eqs[j].need - eqs[i].need;
+      int need_diff = constraints[j].need - constraints[i].need;
       auto diff = SetDiff(A, B);
       if (diff.empty()) {
         continue;
@@ -295,6 +316,230 @@ bool ApplySubsetInference() {
       }
     }
   }
+  return changed;
+}
+
+bool ApplyExactComponentInference(const std::vector<Constraint> &constraints) {
+  // Build frontier variable set
+  std::vector<int> frontier_ids;
+  frontier_ids.reserve(rows * columns);
+  {
+    std::vector<int> seen(rows * columns, 0);
+    for (const auto &con : constraints) {
+      for (int id : con.vars) {
+        if (!seen[id]) {
+          seen[id] = 1;
+          frontier_ids.push_back(id);
+        }
+      }
+    }
+  }
+
+  if (frontier_ids.empty()) {
+    return false;
+  }
+
+  std::unordered_map<int, int> id_to_idx;
+  id_to_idx.reserve(frontier_ids.size() * 2 + 1);
+  for (int i = 0; i < static_cast<int>(frontier_ids.size()); ++i) {
+    id_to_idx[frontier_ids[i]] = i;
+  }
+
+  // Graph on frontier variables: connect variables that appear in same constraint.
+  int V = static_cast<int>(frontier_ids.size());
+  std::vector<std::vector<int>> var_graph(V);
+  std::vector<std::vector<int>> constraint_vars_idx;
+  constraint_vars_idx.reserve(constraints.size());
+
+  for (const auto &con : constraints) {
+    std::vector<int> ids;
+    ids.reserve(con.vars.size());
+    for (int cid : con.vars) {
+      ids.push_back(id_to_idx[cid]);
+    }
+    constraint_vars_idx.push_back(ids);
+    for (int i = 1; i < static_cast<int>(ids.size()); ++i) {
+      int a = ids[i - 1], b = ids[i];
+      var_graph[a].push_back(b);
+      var_graph[b].push_back(a);
+    }
+  }
+
+  bool changed = false;
+  std::vector<int> comp_of_var(V, -1);
+  int comp_cnt = 0;
+  for (int i = 0; i < V; ++i) {
+    if (comp_of_var[i] != -1) {
+      continue;
+    }
+    std::queue<int> q;
+    q.push(i);
+    comp_of_var[i] = comp_cnt;
+    while (!q.empty()) {
+      int u = q.front();
+      q.pop();
+      for (int v : var_graph[u]) {
+        if (comp_of_var[v] == -1) {
+          comp_of_var[v] = comp_cnt;
+          q.push(v);
+        }
+      }
+    }
+    ++comp_cnt;
+  }
+
+  std::vector<std::vector<int>> comp_vars(comp_cnt);
+  for (int i = 0; i < V; ++i) {
+    comp_vars[comp_of_var[i]].push_back(i);
+  }
+
+  // Assign constraints to components using first variable.
+  std::vector<std::vector<int>> comp_constraints(comp_cnt);
+  for (int ci = 0; ci < static_cast<int>(constraints.size()); ++ci) {
+    if (constraint_vars_idx[ci].empty()) {
+      continue;
+    }
+    int comp = comp_of_var[constraint_vars_idx[ci][0]];
+    comp_constraints[comp].push_back(ci);
+  }
+
+  constexpr int kExactLimit = 22;
+
+  for (int comp = 0; comp < comp_cnt; ++comp) {
+    auto &vars = comp_vars[comp];
+    if (vars.empty()) {
+      continue;
+    }
+
+    // If component is too large, skip expensive exact enumeration.
+    if (static_cast<int>(vars.size()) > kExactLimit) {
+      continue;
+    }
+
+    std::unordered_map<int, int> local_idx;
+    local_idx.reserve(vars.size() * 2 + 1);
+    for (int i = 0; i < static_cast<int>(vars.size()); ++i) {
+      local_idx[vars[i]] = i;
+    }
+
+    struct LocalConstraint {
+      std::vector<int> lv;
+      int need;
+    };
+    std::vector<LocalConstraint> local_cons;
+    local_cons.reserve(comp_constraints[comp].size());
+
+    for (int ci : comp_constraints[comp]) {
+      LocalConstraint lc;
+      lc.need = constraints[ci].need;
+      for (int gv : constraint_vars_idx[ci]) {
+        lc.lv.push_back(local_idx[gv]);
+      }
+      local_cons.push_back(std::move(lc));
+    }
+
+    int n = static_cast<int>(vars.size());
+    int m = static_cast<int>(local_cons.size());
+    std::vector<std::vector<int>> var_to_cons(n);
+    for (int ci = 0; ci < m; ++ci) {
+      for (int v : local_cons[ci].lv) {
+        var_to_cons[v].push_back(ci);
+      }
+    }
+
+    // Variable order by degree (high first) for stronger pruning.
+    std::vector<int> order(n);
+    for (int i = 0; i < n; ++i) {
+      order[i] = i;
+    }
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+      return var_to_cons[a].size() > var_to_cons[b].size();
+    });
+
+    std::vector<int> assign(n, -1);
+    std::vector<int> assigned_cnt(m, 0), mine_cnt(m, 0);
+
+    long double total_ways = 0.0L;
+    std::vector<long double> mine_ways(n, 0.0L);
+
+    auto feasible = [&](int ci) {
+      int assigned = assigned_cnt[ci];
+      int mines = mine_cnt[ci];
+      int size = static_cast<int>(local_cons[ci].lv.size());
+      int need = local_cons[ci].need;
+      if (mines > need) {
+        return false;
+      }
+      int max_possible = mines + (size - assigned);
+      if (max_possible < need) {
+        return false;
+      }
+      return true;
+    };
+
+    std::function<void(int)> dfs = [&](int idx) {
+      if (idx == n) {
+        for (int ci = 0; ci < m; ++ci) {
+          if (mine_cnt[ci] != local_cons[ci].need) {
+            return;
+          }
+        }
+        total_ways += 1.0L;
+        for (int i = 0; i < n; ++i) {
+          if (assign[i] == 1) {
+            mine_ways[i] += 1.0L;
+          }
+        }
+        return;
+      }
+
+      int v = order[idx];
+      for (int val = 0; val <= 1; ++val) {
+        assign[v] = val;
+        bool ok = true;
+        for (int ci : var_to_cons[v]) {
+          ++assigned_cnt[ci];
+          mine_cnt[ci] += val;
+          if (!feasible(ci)) {
+            ok = false;
+          }
+        }
+
+        if (ok) {
+          dfs(idx + 1);
+        }
+
+        for (int ci : var_to_cons[v]) {
+          --assigned_cnt[ci];
+          mine_cnt[ci] -= val;
+        }
+      }
+      assign[v] = -1;
+    };
+
+    dfs(0);
+
+    if (total_ways < 0.5L) {
+      continue;
+    }
+
+    for (int li = 0; li < n; ++li) {
+      double p = static_cast<double>(mine_ways[li] / total_ways);
+      int gid = frontier_ids[vars[li]];
+      auto [r, c] = DecodeId(gid);
+      has_exact_prob[r][c] = true;
+      exact_prob[r][c] = p;
+
+      if (p <= 1e-12) {
+        EnqueueVisit(r, c);
+        changed = true;
+      } else if (p >= 1.0 - 1e-12) {
+        EnqueueMark(r, c);
+        changed = true;
+      }
+    }
+  }
+
   return changed;
 }
 
@@ -336,36 +581,41 @@ Action ChooseGuess() {
 
       double p = base_p;
       int info = 0;
-      for (int k = 0; k < 8; ++k) {
-        int nr = r + dr[k], nc = c + dc[k];
-        if (!InBounds(nr, nc) || board[nr][nc] < 0) {
-          continue;
-        }
-        ++info;
-        int clue = board[nr][nc];
-        int flagged = 0, unknown = 0;
-        for (int t = 0; t < 8; ++t) {
-          int xr = nr + dr[t], xc = nc + dc[t];
-          if (!InBounds(xr, xc)) {
+
+      if (has_exact_prob[r][c]) {
+        p = exact_prob[r][c];
+      } else {
+        for (int k = 0; k < 8; ++k) {
+          int nr = r + dr[k], nc = c + dc[k];
+          if (!InBounds(nr, nc) || board[nr][nc] < 0) {
             continue;
           }
-          if (board[xr][xc] == kFlagged) {
-            ++flagged;
-          } else if (board[xr][xc] == kUnknown) {
-            ++unknown;
+          ++info;
+          int clue = board[nr][nc];
+          int flagged = 0, unknown = 0;
+          for (int t = 0; t < 8; ++t) {
+            int xr = nr + dr[t], xc = nc + dc[t];
+            if (!InBounds(xr, xc)) {
+              continue;
+            }
+            if (board[xr][xc] == kFlagged) {
+              ++flagged;
+            } else if (board[xr][xc] == kUnknown) {
+              ++unknown;
+            }
           }
-        }
-        if (unknown > 0) {
-          int need = clue - flagged;
-          if (need < 0) {
-            need = 0;
-          }
-          if (need > unknown) {
-            need = unknown;
-          }
-          double local_p = static_cast<double>(need) / static_cast<double>(unknown);
-          if (local_p > p) {
-            p = local_p;
+          if (unknown > 0) {
+            int need = clue - flagged;
+            if (need < 0) {
+              need = 0;
+            }
+            if (need > unknown) {
+              need = unknown;
+            }
+            double local_p = static_cast<double>(need) / static_cast<double>(unknown);
+            if (local_p > p) {
+              p = local_p;
+            }
           }
         }
       }
@@ -405,9 +655,12 @@ void InitGame() {
       queued_visit[i][j] = false;
       queued_mark[i][j] = false;
       queued_auto[i][j] = false;
+      has_exact_prob[i][j] = false;
+      exact_prob[i][j] = 0.0;
     }
   }
   ResetQueues();
+  ClearExactProb();
 
   int first_row, first_column;
   std::cin >> first_row >> first_column;
@@ -437,7 +690,6 @@ void ReadMap() {
       } else if ('0' <= ch && ch <= '8') {
         board[i][j] = ch - '0';
       } else {
-        // 'X' appears only when game is already over, but keep parser robust.
         board[i][j] = kUnknown;
       }
     }
@@ -457,16 +709,31 @@ void Decide() {
 
   bool changed = true;
   int rounds = 0;
-  while (changed && rounds < 6) {
+  while (changed && rounds < 8) {
     changed = false;
+    ClearExactProb();
+
     if (ApplyBasicInference()) {
       changed = true;
     }
-    if (ApplySubsetInference()) {
+    auto constraints = BuildConstraints();
+    if (ApplySubsetInference(constraints)) {
+      changed = true;
+    }
+    if (ApplyExactComponentInference(constraints)) {
       changed = true;
     }
     ++rounds;
   }
+
+  if (ExecuteFromQueue()) {
+    return;
+  }
+
+  // Refresh exact probabilities for guessing stage.
+  ClearExactProb();
+  auto constraints = BuildConstraints();
+  ApplyExactComponentInference(constraints);
 
   if (ExecuteFromQueue()) {
     return;
